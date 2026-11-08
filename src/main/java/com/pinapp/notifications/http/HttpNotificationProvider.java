@@ -6,6 +6,8 @@ import com.pinapp.notifications.provider.ProviderException;
 import com.pinapp.notifications.provider.ProviderResponse;
 
 import java.io.IOException;
+import java.net.http.HttpTimeoutException;
+import java.time.Duration;
 import java.util.Objects;
 
 /**
@@ -33,16 +35,32 @@ public abstract class HttpNotificationProvider<N extends Notification> implement
         HttpResponse response;
         try {
             response = transport.execute(request);
+        } catch (HttpTimeoutException e) {
+            throw ProviderException.of(ProviderException.Reason.TIMEOUT,
+                    name + ": timed out (" + e.getMessage() + ")", true, null, null, e);
         } catch (IOException e) {
             throw new ProviderException(name + ": network failure (" + e.getMessage() + ")", true, null, e);
         }
         if (!response.isSuccessful()) {
             boolean retryable = response.status() == 429 || response.status() >= 500;
-            throw new ProviderException(name + " rejected the request (HTTP " + response.status() + "): "
-                    + describeError(response), retryable, response.status(), null);
+            throw ProviderException.of(ProviderException.Reason.FAILURE,
+                    name + " rejected the request (HTTP " + response.status() + "): " + describeError(response),
+                    retryable, response.status(), retryAfter(response), null);
         }
         verifyResponse(response);
         return ProviderResponse.of(name, extractMessageId(response));
+    }
+
+    /** Parses {@code Retry-After} given in seconds (the HTTP-date form is ignored). */
+    private static Duration retryAfter(HttpResponse response) {
+        return response.header("Retry-After").map(value -> {
+            try {
+                long seconds = Long.parseLong(value.trim());
+                return seconds >= 0 ? Duration.ofSeconds(seconds) : null;
+            } catch (NumberFormatException e) {
+                return null;
+            }
+        }).orElse(null);
     }
 
     /** Translates the notification into the vendor's request format. */

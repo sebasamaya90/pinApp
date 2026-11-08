@@ -104,6 +104,44 @@ CompletableFuture<NotificationResult> f = service.sendAsync(notification);      
 CompletableFuture<List<NotificationResult>> all = service.sendAll(lista);        // nunca falla en bloque: un resultado por notificación, en orden
 ```
 
+### Resiliencia HTTP
+
+Implementada a mano (sin Resilience4j) como **decoradores de `NotificationProvider`**, aplicados a *cada* proveedor con estado independiente (el breaker de SendGrid no afecta a Mailgun).
+
+```java
+Channels.email()
+    .provider(sendGrid).fallbackTo(mailgun)
+    .resilience(Resilience.recommended())      // o Resilience.builder()... a medida
+    .build();
+```
+
+| Mecanismo | Clase | Comportamiento |
+|---|---|---|
+| **Retry + backoff** | `RetryingProvider`, `RetryPolicy` | `recommended()`: 3 intentos, backoff exponencial 200 ms→2 s con *jitter* 50%. Solo reintenta fallos transitorios (red, timeout, 429/5xx). Respeta el `Retry-After` del proveedor y un **deadline global** (`maxElapsed`, 10 s) |
+| **Circuit breaker** | `CircuitBreaker` | Ventana deslizante de 10 llamadas; abre con ≥50% de fallos (mín. 5); 30 s abierto → HALF_OPEN con 2 pruebas. Solo cuentan fallos transitorios (un 4xx no abre el breaker). Abierto = falla rápido y **no reintentable** → el failover pasa al siguiente proveedor al instante |
+| **Timeouts** | `JdkHttpTransport` | `connectTimeout` (2 s) y `requestTimeout` (5 s) sobre `java.net.http`; no sigue redirects (no reenvía credenciales). Un timeout → `ProviderException` con `reason()==TIMEOUT`, reintentable |
+| **Bulkhead** | `Bulkhead` | Semáforo por proveedor (20 llamadas concurrentes por defecto; hilos virtuales, por eso no es un pool). Lleno = falla rápido, no reintentable |
+| **Rate limiter** | `RateLimiter` | *Token bucket* (`permitsPerSecond`, `burst`). No está en `recommended()` porque la cuota depende de tu plan con el vendor: `.rateLimiter(new RateLimiter.Config(50, 100))`. Un rechazo es reintentable e informa cuánto esperar |
+
+Orden del stack por proveedor: `Retry( RateLimiter( Bulkhead( CircuitBreaker( proveedor ))))`. El breaker va más adentro para juzgar solo llamadas reales al vendor; el retry va afuera para que cada intento pase por todas las protecciones.
+
+```java
+var http = new JdkHttpTransport(new JdkHttpTransport.Config(Duration.ofSeconds(2), Duration.ofSeconds(5)));
+var sendGrid = new SendGridEmailProvider(config, http);   // transporte real en lugar del simulado
+
+Resilience.builder()
+    .retryPolicy(RetryPolicy.withJitter(RetryPolicy.exponentialBackoff(3, Duration.ofMillis(200), Duration.ofSeconds(2)), 0.5))
+    .maxElapsed(Duration.ofSeconds(10))
+    .circuitBreaker(CircuitBreaker.Config.defaults())
+    .circuitBreakerListener(t -> metrics.breaker(t.name(), t.to()))   // CLOSED / OPEN / HALF_OPEN
+    .bulkhead(new Bulkhead.Config(20, Duration.ZERO))
+    .rateLimiter(new RateLimiter.Config(50, 100))
+    .build();
+```
+
+> **Cuidado con los duplicados:** tras un *request timeout* el proveedor pudo haber procesado el mensaje, así que un reintento puede (raramente) duplicarlo. Los fallos de conexión sí son siempre seguros de reintentar. Twilio, SendGrid y Mailgun no ofrecen idempotency key nativa para estos endpoints; si el duplicado es inaceptable (p. ej. SMS con cobro), usá `RetryPolicy.none()` para ese canal.
+> El `requestTimeout` se aplica por intento: con 3 intentos de 5 s el peor caso es ~15 s, pero el deadline de 10 s impide *iniciar* otro intento cuando ya no cabe.
+
 ### Templates
 
 ```java
@@ -152,7 +190,7 @@ service = NotificationService.builder()
 | **D**ependency Inversion | el servicio depende de `NotificationChannel`; los proveedores del puerto `HttpTransport` (inyectable → tests sin red) |
 | Facade | `NotificationService` |
 | Strategy | `RetryPolicy`, `NotificationProvider` |
-| Decorator | `RetryingProvider` |
+| Decorator | `RetryingProvider`, `CircuitBreakerProvider`, `BulkheadProvider`, `RateLimiterProvider` (apilados por `Resilience`) |
 | Composite / Chain | `FallbackProvider` (failover) |
 | Template Method | `HttpNotificationProvider` |
 | Builder | `NotificationService.builder()`, `StandardChannel.builder()`, `EmailNotification.builder()` |
@@ -186,15 +224,17 @@ Otras decisiones:
 
 ## Qué falta / próximos pasos
 
-- Transporte HTTP real (`java.net.http`) con timeouts, refresco automático del token OAuth2 de FCM y respeto de `Retry-After`.
-- Idempotencia (clave de deduplicación) y *jitter* en el backoff.
+- Refresco automático del token OAuth2 de FCM y parseo de `Retry-After` en formato HTTP-date (hoy solo segundos).
+- Idempotencia (clave de deduplicación) para evitar duplicados al reintentar tras un timeout.
+- Rate limiter distribuido (el actual es por instancia/JVM) y métricas del breaker/bulkhead listas para Micrometer.
 - Adjuntos, CC/BCC y múltiples destinatarios en email; prioridad/TTL en push.
 - Publicación en Maven Central y métricas (Micrometer) como módulo opcional.
 - Se priorizó: abstracción + 3 canales obligatorios + errores + tests, y luego los opcionales (async, reintentos, validación, templates, Pub/Sub, Slack, Docker).
 
 ## Tests
 
-`mvn test` (66 tests, JUnit 5, sin mocks mágicos: dobles escritos a mano `ScriptedTransport` y `FakeProvider`). Cubren validadores, política de reintentos, failover, payload y manejo de errores de cada proveedor, enrutamiento, eventos, async/lote y la extensión con un canal nuevo definido solo en tests.
+`mvn test` (101 tests, JUnit 5, sin mocks mágicos: dobles escritos a mano `ScriptedTransport`, `FakeProvider` y un `MutableClock`). Cubren validadores, política de reintentos, failover, payload y manejo de errores de cada proveedor, enrutamiento, eventos, async/lote y la extensión con un canal nuevo definido solo en tests.
+La resiliencia se prueba con reloj y *sleeper* inyectados (cero esperas reales): máquina de estados del breaker, bulkhead con concurrencia real, token bucket, `Retry-After`, deadline, y la composición completa (breaker abierto → sin reintentos → failover). Los timeouts de `JdkHttpTransport` se verifican contra un servidor HTTP local en loopback.
 
 ## Uso de IA
 

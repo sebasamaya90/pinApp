@@ -13,6 +13,10 @@ import com.pinapp.notifications.http.HttpResponse;
 import com.pinapp.notifications.http.SimulatedHttpTransport;
 import com.pinapp.notifications.push.FcmPushProvider;
 import com.pinapp.notifications.push.PushNotification;
+import com.pinapp.notifications.resilience.Bulkhead;
+import com.pinapp.notifications.resilience.CircuitBreaker;
+import com.pinapp.notifications.resilience.RateLimiter;
+import com.pinapp.notifications.resilience.Resilience;
 import com.pinapp.notifications.retry.RetryPolicy;
 import com.pinapp.notifications.slack.SlackChannel;
 import com.pinapp.notifications.slack.SlackNotification;
@@ -102,6 +106,27 @@ public final class NotificationExamples {
                 .build()) {
             NotificationResult result = resilient.send(EmailNotification.of("ana@example.com", "Hi", "Failover!"));
             System.out.println("   SendGrid was called " + calls.get() + " times, delivered by: " + result.provider());
+        }
+
+        section("6. Circuit breaker (provider keeps failing: it opens and fails fast)");
+        var alwaysDown = new SimulatedHttpTransport(req -> new HttpResponse(500, Map.of(), "{}"));
+        Resilience protectedStack = Resilience.builder()
+                .circuitBreaker(new CircuitBreaker.Config(4, 2, 0.5, Duration.ofSeconds(30), 1))
+                .circuitBreakerListener(t -> System.out.println("   [breaker] " + t.from() + " -> " + t.to()))
+                .bulkhead(new Bulkhead.Config(10, Duration.ZERO))
+                .rateLimiter(new RateLimiter.Config(100, 100))
+                .build();
+        try (NotificationService s = NotificationService.builder()
+                .register(Channels.email()
+                        .provider(new SendGridEmailProvider(
+                                new SendGridEmailProvider.Config(Secret.of("SG.demo"), "no-reply@pinapp.dev", null), alwaysDown))
+                        .resilience(protectedStack)
+                        .build())
+                .build()) {
+            for (int i = 1; i <= 4; i++) {
+                System.out.print("   call " + i + ":");
+                show(s.trySend(EmailNotification.of("ana@example.com", "Hi", "x")));
+            }
         }
     }
 

@@ -52,6 +52,28 @@ try (NotificationService service = NotificationService.builder()
 }
 ```
 
+### ¿De dónde sale `Secret.fromEnv("SENDGRID_API_KEY")`?
+
+`Secret.fromEnv("X")` lee la **variable de entorno** `X` del proceso que ejecuta tu aplicación. La librería no lee ningún archivo: vos definís la variable antes de arrancar.
+
+1. **Obtené la clave en el panel del proveedor.** En SendGrid: *Settings → API Keys → Create API Key*; conviene una clave restringida solo a "Mail Send". Se muestra una única vez.
+2. **Exportala como variable de entorno** antes de ejecutar la aplicación:
+
+   ```bash
+   export SENDGRID_API_KEY="SG.xxxxxxxx"                     # Linux / macOS
+   ```
+   ```powershell
+   $env:SENDGRID_API_KEY = "SG.xxxxxxxx"                     # Windows (PowerShell)
+   ```
+   ```bash
+   docker run --rm -e SENDGRID_API_KEY=SG.xxxxxxxx mi-imagen  # Docker (o --env-file; en Kubernetes, un Secret)
+   ```
+   En producción la variable la inyecta tu plataforma (secrets de Kubernetes, CI/CD, un gestor como Vault o AWS Secrets Manager); nunca la escribas en el código ni la subas al repositorio.
+
+> **Para probar el Quick start sin una clave real:** los proveedores usan por defecto un transporte **simulado** (no salen a internet), así que sirve cualquier valor, p. ej. `export SENDGRID_API_KEY=SG.demo`. Ojo: si la variable **no existe**, `fromEnv` lanza `IllegalStateException` a propósito, para no arrancar con una credencial vacía.
+
+Si preferís obtener el valor de otro sitio (un gestor de secretos, por ejemplo), usá `Secret.of(valor)`.
+
 ## Configuración
 
 Un **canal** = validador + proveedor(es) + política de reintentos. Se arma con un builder y se registra en el servicio.
@@ -89,7 +111,7 @@ EmailNotification.builder().to("ana@x.com").to("luis@x.com").cc("jefe@x.com").bc
 PushNotification.builder().deviceToken(token).title("Alerta").body("Nuevo acceso")
         .priority(PushNotification.Priority.HIGH).ttl(Duration.ofMinutes(10)).build();
 ```
-Los adjuntos de email **no** están implementados (ver "Qué falta").
+Los adjuntos de email **no** están implementados.
 
 ### Manejo de errores
 
@@ -121,6 +143,17 @@ CompletableFuture<List<NotificationResult>> all = service.sendAll(lista);       
 ```
 `sendAll` rechaza lotes mayores a `maxBatchSize` (1000 por defecto, configurable en el builder del servicio) con `IllegalArgumentException`, para proteger memoria y cuotas del vendor.
 
+**Ejemplo de lote** (puede mezclar canales; cada notificación va al suyo):
+
+```java
+List<Notification> lote = List.of(
+    EmailNotification.of("a@x.com", "Hola", "..."),
+    new SmsNotification("+5491155550000", "Tu código: 1234"),
+    PushNotification.builder().deviceToken("tok").body("Novedad").build());
+
+List<NotificationResult> resultados = service.sendAll(lote).join();   // join() espera a que terminen todas
+```
+
 ### Idempotencia (evitar duplicados)
 
 Todos los métodos de envío tienen una variante con clave de idempotencia: `send(n, "factura-42-email")`, `trySend`, `sendAsync`.
@@ -134,10 +167,6 @@ NotificationService.builder()
 service.send(email, "factura-42-email");   // SENT
 service.send(email, "factura-42-email");   // DUPLICATE: no se envía, no es una excepción
 ```
-
-- **Fase 1, `DeliveryContext`:** el id de la notificación se genera una vez antes del primer intento y viaja a los proveedores (`DeliveryContext.current()`, implementado con `ScopedValue`, sin cambiar el SPI) idéntico en cada reintento y failover. SendGrid lo envía como `personalizations[0].custom_args.notification_id` y Mailgun como `v:notification-id`, de modo que se ve en sus webhooks y se pueden conciliar duplicados. En la documentación oficial revisada de SendGrid, Mailgun, Twilio, Vonage y FCM no se encontró una cabecera de idempotencia para estos endpoints (ausencia de evidencia, no una afirmación de que no exista), por eso no se usa ninguna.
-- **Fase 2, `DeduplicationStore`:** `tryClaim(key, ttl)` / `release(key)`. Incluye `InMemoryDeduplicationStore` (una JVM). Para varias instancias, implementar la interfaz sobre Redis (`SET key 1 NX PX ttl`) o una tabla con clave única.
-- **Semántica:** si el envío falla, la clave se libera y el cliente puede reintentar (*at-least-once*). Tras un timeout ambiguo eso aún puede duplicar un mensaje; es un compromiso explícito frente a perder uno.
 
 ### Resiliencia HTTP
 
@@ -178,9 +207,6 @@ Resilience.builder()
     .rateLimiter(new RateLimiter.Config(50, 100))
     .build();
 ```
-
-> **Cuidado con los duplicados:** tras un *request timeout* el proveedor pudo haber procesado el mensaje, así que un reintento puede (raramente) duplicarlo. Los fallos de conexión sí son siempre seguros de reintentar. Si el duplicado es inaceptable (p. ej. SMS con cobro), usá `RetryPolicy.none()` para ese canal. La deduplicación por clave (sección anterior) cubre los reenvíos del *cliente*, no los reintentos internos tras un timeout.
-> El `requestTimeout` se aplica por intento: con 3 intentos de 5 s el peor caso es ~15 s, pero el deadline de 10 s impide *iniciar* otro intento cuando ya no cabe.
 
 ### Token OAuth2 de FCM (refresco automático)
 
@@ -250,7 +276,7 @@ String body = MessageTemplate.of("Hola {{name}}, tu pedido {{order}} está listo
 
 ### Verificación contra la documentación oficial
 
-Los escenarios simulados se contrastaron con la documentación oficial de cada proveedor. Esto es lo que se confirmó, lo que **no** se pudo confirmar y lo que se corrigió a raíz de esa revisión.
+Los escenarios simulados se contrastaron con la documentación oficial de cada proveedor.
 
 **Confirmado en la documentación**
 
@@ -262,26 +288,6 @@ Los escenarios simulados se contrastaron con la documentación oficial de cada p
 | [Vonage](https://developer.vonage.com/en/messaging/sms/guides/troubleshooting-sms) | `POST https://rest.nexmo.com/sms/json`; HTTP 200 aunque falle: el resultado real está en `messages[].status` (0 ok, 1 throttled, 5 error interno, 4 credenciales, 9 sin saldo, 12 mensaje largo, 15 remitente inválido…) |
 | [FCM v1](https://firebase.google.com/docs/reference/fcm/rest/v1/projects.messages/send) | `POST https://fcm.googleapis.com/v1/projects/{id}/messages:send`; scope `firebase.messaging`; cuerpo `{"message": {...}}`; `data` solo strings y con claves reservadas; `android.priority` `normal`/`high`; `android.ttl` en segundos con sufijo `s` (0 a 28 días, `0s` = ahora o nunca); `apns-expiration` como epoch absoluto; límite 4096 bytes; errores `UNREGISTERED` 404, `QUOTA_EXCEEDED` 429 (backoff mínimo de 1 minuto), `UNAVAILABLE` 503 (respetar `Retry-After`), `INVALID_ARGUMENT` 400 |
 | [Slack](https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks/) | `POST` al webhook con `{"text": "..."}`; respuesta 200 `ok`; errores 400/403/404 con `invalid_payload`, `no_service`, `no_text`, `channel_not_found`…; ~1 mensaje/s por canal con ráfagas permitidas y HTTP 429 con `Retry-After`; truncado a 40 000 caracteres |
-
-**Corregido tras la revisión**
-- **Slack:** los webhooks modernos *no* permiten cambiar el canal ("you cannot override the default channel"). Se eliminó el campo `target` y el `channel` del payload: el canal lo define el webhook, y para varios canales se registra un webhook por canal.
-- **FCM, HTTP 401:** el único 401 documentado en FCM es `THIRD_PARTY_AUTH_ERROR` (certificado APNs o clave web push inválidos). Refrescar nuestro token OAuth no lo arregla, así que ya **no** se reintenta ni se invalida el token. Un 401 con otro estado (el `UNAUTHENTICATED` estándar de Google para un token vencido) sí invalida el token y se reintenta.
-- **FCM, 429 `QUOTA_EXCEEDED`:** la documentación pide backoff exponencial desde 1 minuto y advierte de riesgo de denylist; reintentar a los 200 ms era lo contrario. Ahora un 429 pide al menos 1 minuto (el deadline de `Resilience` corta los reintentos en lugar de insistir).
-- **FCM, claves reservadas:** `from`, `message_type`, `google.*` y `gcm.notification.*` se rechazan en validación.
-- **SendGrid:** `custom_args` se movió dentro de la personalización, donde la documentación lo tipa como objeto.
-
-**No se pudo confirmar en la documentación consultada** (la implementación sigue lo que se conoce del comportamiento real; verificar antes de producción)
-- SendGrid: la cabecera de respuesta `X-Message-Id` (la página de referencia no la menciona).
-- Mailgun: el cuerpo de respuesta `{"id": "...", "message": "Queued. Thank you."}` y el uso de variables `v:`.
-- Vonage: el campo `error-text` y el tratamiento del `+` inicial (el ejemplo oficial usa el número sin `+`, que es lo que se envía).
-- FCM: que un token OAuth vencido responda `401 UNAUTHENTICATED` (es la convención de Google, no figura en la página de FCM); y el significado de `apns-expiration: 0` (viene de la documentación de Apple, no de la de FCM).
-- FCM: la referencia consultada indica que `token` está marcado como obsoleto en favor de `fid`; no se verificó ni se cambió. Conviene revisar la referencia vigente antes de publicar.
-- Twilio: no se encontró soporte de idempotencia (ni evidencia de lo contrario).
-
-**Diferencias conocidas con los proveedores reales** (ver "Qué falta")
-- Twilio permite enviar con `MessagingServiceSid` en lugar de `From`; solo se soporta `From`. Su documentación recomienda API Key SID + secret para la autenticación; aquí se usa Account SID + Auth Token (también válido).
-- Los hosts son los de EE. UU.; SendGrid y Mailgun tienen hosts EU que hoy no son configurables.
-- Vonage: aquí `api_key`/`api_secret` viajan en el cuerpo del formulario; la documentación también describe autenticación por cabecera `Authorization` Basic.
 
 ## Cómo extender
 
@@ -366,29 +372,34 @@ Otras decisiones:
 | `DeliveryContext` | id de notificación y clave de idempotencia visibles para los proveedores |
 | `Secret`, `MessageTemplate`, `Masking` | credenciales seguras, plantillas `{{var}}`, enmascarado de datos personales |
 
-## Qué falta / próximos pasos
-
-**Hecho**
-- Núcleo: abstracción común, 3 canales obligatorios (Email, SMS, Push) + Slack, errores tipados, validación, templates, Pub/Sub, async y lote, Docker.
-- Resiliencia: retry con backoff y jitter, `Retry-After` (segundos y HTTP-date), deadline, circuit breaker, bulkhead, rate limiter, timeouts, failover.
-- Seguridad: HTTPS obligatorio, inyección de cabeceras, límites de tamaño y de respuesta, enmascarado, imágenes con digest, CI con escaneo.
-- Token OAuth2 de FCM con refresco automático; idempotencia (id de entrega + `DeduplicationStore`); CC/BCC y múltiples destinatarios; prioridad y TTL en push.
-- Hooks de observabilidad (eventos, breaker, bulkhead) listos para conectar a Micrometer u otro sistema; `pom` preparado para Maven Central.
-
-**Siguiente (decidido, aún no hecho)**
-- **Adjuntos de email**: se dejó aparte a propósito; implica tamaño máximo, tipo MIME, base64 y límites distintos por proveedor.
-- Publicar en Maven Central: falta confirmar `groupId` verificado, `scm`/`url`, licencia y la clave GPG (ver "Instalación").
-- Implementaciones de referencia de `DeduplicationStore` y `RateLimiter` sobre Redis, como módulo opcional aparte.
-- Cerrar las diferencias con los proveedores reales: `MessagingServiceSid` en Twilio, hosts EU configurables (SendGrid/Mailgun) y autenticación por cabecera en Vonage.
-
-**Descartado a propósito**
-- Rate limiter distribuido dentro del núcleo: exigiría infraestructura (Redis); se ofrece el puerto `RateLimiter` en su lugar.
-- Dependencia de Google para el token de FCM: la librería solo define `TokenFetcher`.
-- Módulo de métricas Micrometer: se descartó para mantener un único `pom`; los hooks del núcleo permiten conectarlo en ~10 líneas (ver "Métricas y observabilidad").
-- Resilience4j: los mecanismos se escribieron a mano, como decoradores, para mantener el núcleo sin dependencias y mostrar el diseño.
-
 ## Tests
 
-`mvn test`: 148 tests, JUnit 5, sin mocks mágicos: dobles escritos a mano `ScriptedTransport`, `FakeProvider` y un `MutableClock`. Cubren validadores, política de reintentos, failover, payload y manejo de errores de cada proveedor, enrutamiento, eventos, async/lote y la extensión con un canal nuevo definido solo en tests.
-La resiliencia se prueba con reloj y *sleeper* inyectados (cero esperas reales): máquina de estados del breaker, bulkhead con concurrencia real, token bucket, `Retry-After`, deadline, y la composición completa (breaker abierto → sin reintentos → failover). Los timeouts, el límite de respuesta y el rechazo de HTTP de `JdkHttpTransport` se verifican contra un servidor HTTP local en loopback.
-También se prueban la inyección de cabeceras y los límites de entrada, la deduplicación (expiración, liberación al fallar, id estable entre reintentos) y el refresco de token con reloj simulado.
+`mvn test` ejecuta 148 tests (JUnit 5). Los principales, por área:
+
+**Núcleo y errores**
+- `NotificationServiceTest`: enrutamiento al canal correcto, `ValidationException` sin llegar al proveedor, `DeliveryException` con proveedor e intentos, canal no registrado, `trySend` sin excepciones, failover, eventos a suscriptores, suscriptor defectuoso aislado, `sendAsync` y `sendAll` (orden y fallos individuales).
+- `ExtensibilityTest`: un canal "whatsapp" definido solo en el código de test funciona con el servicio sin modificarlo (principio abierto/cerrado).
+- `ChannelTypeTest`: normalización y validación de `ChannelType`.
+- `TemplateAndSecretTest`: templates `{{var}}` (variables faltantes) y `Secret` (nunca se revela por accidente).
+
+**Validación**
+- `ValidatorsTest`: reglas de Email, SMS (E.164), Push y Slack; todos los errores se reportan a la vez.
+- `SecurityHardeningTest`: inyección de cabeceras, límites de tamaño, lotes demasiado grandes, rechazo de HTTP no seguro, respuestas truncadas, `Masking` y `Retry-After` (segundos y fecha HTTP).
+
+**Proveedores (payload, respuesta y errores simulados)**
+- `EmailProvidersTest` y `EmailRecipientsTest`: SendGrid y Mailgun; CC, BCC y varios destinatarios.
+- `SmsProvidersTest`: Twilio y Vonage (incluido el error dentro de un HTTP 200).
+- `PushAndSlackProvidersTest`: FCM y el webhook de Slack.
+- `FcmTokensAndOptionsTest`: refresco automático del token, 401, 429 y 503 de FCM, prioridad y TTL.
+
+**Resiliencia**
+- `RetryPolicyTest` y `RetryingAndFallbackProviderTest`: backoff, reintentos solo de fallos transitorios y failover entre proveedores.
+- `CircuitBreakerTest`: transiciones cerrado, abierto y semiabierto.
+- `ProviderDecoratorsTest`: circuit breaker, bulkhead (con concurrencia real) y rate limiter como decoradores.
+- `ResilienceTest`: `Retry-After`, deadline global y la composición completa (breaker abierto, sin reintentos, failover inmediato).
+- `HttpResilienceTest`: `JdkHttpTransport` contra un servidor local (respuesta, timeout y puerto cerrado) y clasificación de errores por proveedor.
+
+**Idempotencia**
+- `IdempotencyTest`: deduplicación (expiración, liberación al fallar), id de entrega estable entre reintentos y etiquetado en SendGrid y Mailgun.
+
+**Cómo están hechos.** No se usa Mockito: los dobles están escritos a mano (`ScriptedTransport` reproduce respuestas HTTP y fallos, `FakeProvider` simula proveedores que fallan, `MutableClock` controla el tiempo). El reloj y el *sleeper* son inyectables, así que los tests de reintentos, breaker y token no esperan tiempo real. Ningún test sale a internet: lo único que usa sockets reales son `HttpResilienceTest` y una prueba de `SecurityHardeningTest` (respuestas truncadas), contra un servidor en loopback. El `Dockerfile` ejecuta estos tests al construir la imagen, de modo que no se genera si alguno falla.

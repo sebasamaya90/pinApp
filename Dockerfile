@@ -2,7 +2,7 @@
 # Refresh with: docker buildx imagetools inspect <image:tag>   (Dependabot also proposes updates)
 
 # ---- Stage 1: build + run unit tests (Java 25 / Maven) ----
-FROM maven:3.9.11-eclipse-temurin-25@sha256:407c4423cec0cf2981055bc2c6c0dc211d9605b6669279b95997f2d1c7e91e2c AS build
+FROM maven:3.9-eclipse-temurin-26@sha256:b2c1ad85954592f9928e84327c65201f308ad9b5d8ed7d5b823717c97bf23fbb AS build
 WORKDIR /build
 COPY pom.xml .
 RUN mvn -B -q dependency:go-offline

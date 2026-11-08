@@ -58,16 +58,16 @@ class PushAndSlackProvidersTest {
     }
 
     @Test
-    void slackPostsTextAndOptionalChannelToWebhook() throws Exception {
+    void slackPostsOnlyTheTextBecauseTheWebhookFixesTheChannel() throws Exception {
         var transport = ScriptedTransport.responding(200, "ok");
         var provider = new SlackWebhookProvider(
                 new SlackWebhookProvider.Config(Secret.of("https://hooks.slack.com/services/T/B/SECRET")), transport);
 
-        provider.send(new SlackNotification("#ops", "Deploy done"));
+        provider.send(new SlackNotification("Deploy done"));
 
         JsonNode json = Json.read(transport.lastRequest().body());
         assertEquals("Deploy done", json.path("text").asText());
-        assertEquals("#ops", json.path("channel").asText());
+        assertTrue(json.path("channel").isMissingNode(), "modern webhooks cannot override the channel");
         assertFalse(transport.lastRequest().toString().contains("SECRET"), "webhook URL must not be logged");
     }
 
@@ -77,7 +77,7 @@ class PushAndSlackProvidersTest {
         var provider = new SlackWebhookProvider(
                 new SlackWebhookProvider.Config(Secret.of("https://hooks.slack.com/services/T/B/X")), transport);
 
-        ProviderException e = assertThrows(ProviderException.class, () -> provider.send(new SlackNotification(null, "x")));
+        ProviderException e = assertThrows(ProviderException.class, () -> provider.send(new SlackNotification("x")));
 
         assertTrue(e.getMessage().contains("no_service"));
     }

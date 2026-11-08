@@ -8,6 +8,7 @@ import com.pinapp.notifications.http.HttpResponse;
 import com.pinapp.notifications.http.HttpTransport;
 import com.pinapp.notifications.http.Json;
 import com.pinapp.notifications.http.SimulatedHttpTransport;
+import com.pinapp.notifications.provider.DeliveryContext;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -18,7 +19,9 @@ import java.util.UUID;
 
 /**
  * SendGrid v3 Mail Send: {@code POST /v3/mail/send}, Bearer API key, JSON body with
- * personalizations/from/subject/content. Success is HTTP 202 with the id in {@code X-Message-Id}.
+ * personalizations (to/cc/bcc), from, subject and content. Success is HTTP 202 with the id in
+ * {@code X-Message-Id}. The notification id is attached as {@code personalizations[0].custom_args.notification_id}
+ * so it comes back in SendGrid's event webhooks.
  */
 public final class SendGridEmailProvider extends HttpNotificationProvider<EmailNotification> {
 
@@ -51,8 +54,19 @@ public final class SendGridEmailProvider extends HttpNotificationProvider<EmailN
         if (config.fromName() != null) {
             from.put("name", config.fromName());
         }
+        Map<String, Object> personalization = new LinkedHashMap<>();
+        personalization.put("to", addresses(n.to()));
+        if (!n.cc().isEmpty()) {
+            personalization.put("cc", addresses(n.cc()));
+        }
+        if (!n.bcc().isEmpty()) {
+            personalization.put("bcc", addresses(n.bcc()));
+        }
+        // custom_args goes inside the personalization: the docs type it as an object there (key/value strings).
+        DeliveryContext.current().ifPresent(context ->
+                personalization.put("custom_args", Map.of("notification_id", context.notificationId())));
         Map<String, Object> payload = new LinkedHashMap<>();
-        payload.put("personalizations", List.of(Map.of("to", List.of(Map.of("email", n.to())))));
+        payload.put("personalizations", List.of(personalization));
         payload.put("from", from);
         payload.put("subject", n.subject());
         payload.put("content", List.of(Map.of("type", n.html() ? "text/html" : "text/plain", "value", n.body())));
@@ -60,6 +74,10 @@ public final class SendGridEmailProvider extends HttpNotificationProvider<EmailN
         return new HttpRequest("POST", ENDPOINT,
                 Map.of("Authorization", "Bearer " + config.apiKey().reveal(), "Content-Type", "application/json"),
                 Json.write(payload));
+    }
+
+    private static List<Map<String, String>> addresses(List<String> addresses) {
+        return addresses.stream().map(address -> Map.of("email", address)).toList();
     }
 
     @Override

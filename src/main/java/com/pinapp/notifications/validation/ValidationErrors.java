@@ -19,6 +19,16 @@ public final class ValidationErrors {
         return require(value != null && !value.isBlank(), field, "must not be blank");
     }
 
+    /** Blocks header injection (e.g. a subject like "Hi\r\nBcc: attacker@evil.com"). */
+    public ValidationErrors requireNoLineBreaks(String field, String value) {
+        return require(value == null || (value.indexOf('\r') < 0 && value.indexOf('\n') < 0),
+                field, "must not contain line breaks");
+    }
+
+    public ValidationErrors requireMaxLength(String field, String value, int max) {
+        return require(value == null || value.length() <= max, field, "must not exceed " + max + " characters");
+    }
+
     public List<ValidationError> toList() {
         return List.copyOf(errors);
     }

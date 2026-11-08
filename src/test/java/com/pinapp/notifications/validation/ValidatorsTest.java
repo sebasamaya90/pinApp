@@ -65,9 +65,8 @@ class ValidatorsTest {
     }
 
     @Test
-    void slackTargetMustBeChannelOrUser() {
-        assertTrue(slack.validate(new SlackNotification(null, "hi")).isEmpty());
-        assertTrue(slack.validate(new SlackNotification("#ops", "hi")).isEmpty());
-        assertEquals("target", slack.validate(new SlackNotification("ops", "hi")).get(0).field());
+    void slackRequiresANonBlankBody() {
+        assertTrue(slack.validate(new SlackNotification("hi")).isEmpty());
+        assertEquals("body", slack.validate(new SlackNotification(" ")).get(0).field());
     }
 }

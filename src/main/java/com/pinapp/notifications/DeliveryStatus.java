@@ -6,5 +6,7 @@ public enum DeliveryStatus {
     /** The notification was valid but could not be delivered (provider error, channel missing...). */
     FAILED,
     /** The notification was rejected before sending because it is invalid. */
-    REJECTED
+    REJECTED,
+    /** Not sent: the same idempotency key was already processed (a successful earlier send). */
+    DUPLICATE
 }

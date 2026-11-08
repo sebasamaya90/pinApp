@@ -4,6 +4,7 @@ import com.pinapp.notifications.NotificationResult;
 import com.pinapp.notifications.NotificationService;
 import com.pinapp.notifications.channel.Channels;
 import com.pinapp.notifications.config.Secret;
+import com.pinapp.notifications.dedup.InMemoryDeduplicationStore;
 import com.pinapp.notifications.email.EmailNotification;
 import com.pinapp.notifications.email.MailgunEmailProvider;
 import com.pinapp.notifications.email.SendGridEmailProvider;
@@ -13,6 +14,10 @@ import com.pinapp.notifications.http.HttpResponse;
 import com.pinapp.notifications.http.SimulatedHttpTransport;
 import com.pinapp.notifications.push.FcmPushProvider;
 import com.pinapp.notifications.push.PushNotification;
+import com.pinapp.notifications.resilience.Bulkhead;
+import com.pinapp.notifications.resilience.CircuitBreaker;
+import com.pinapp.notifications.resilience.RateLimiter;
+import com.pinapp.notifications.resilience.Resilience;
 import com.pinapp.notifications.retry.RetryPolicy;
 import com.pinapp.notifications.slack.SlackChannel;
 import com.pinapp.notifications.slack.SlackNotification;
@@ -60,7 +65,7 @@ public final class NotificationExamples {
             show(service.send(new SmsNotification("+5491155550000", "Your code is 123456")));
             show(service.send(PushNotification.builder().deviceToken("fcm-token-abc").title("Order shipped")
                     .body("Your order #42 is on its way").data("orderId", "42").build()));
-            show(service.send(new SlackNotification("#alerts", "Deploy finished")));
+            show(service.send(new SlackNotification("Deploy finished")));
 
             section("2. Templates");
             String body = MessageTemplate.of("Hi {{name}}, your order {{order}} is ready")
@@ -102,6 +107,52 @@ public final class NotificationExamples {
                 .build()) {
             NotificationResult result = resilient.send(EmailNotification.of("ana@example.com", "Hi", "Failover!"));
             System.out.println("   SendGrid was called " + calls.get() + " times, delivered by: " + result.provider());
+        }
+
+        section("6. Circuit breaker (provider keeps failing: it opens and fails fast)");
+        var alwaysDown = new SimulatedHttpTransport(req -> new HttpResponse(500, Map.of(), "{}"));
+        Resilience protectedStack = Resilience.builder()
+                .circuitBreaker(new CircuitBreaker.Config(4, 2, 0.5, Duration.ofSeconds(30), 1))
+                .circuitBreakerListener(t -> System.out.println("   [breaker] " + t.from() + " -> " + t.to()))
+                .bulkhead(new Bulkhead.Config(10, Duration.ZERO))
+                .rateLimiter(new RateLimiter.Config(100, 100))
+                .build();
+        try (NotificationService s = NotificationService.builder()
+                .register(Channels.email()
+                        .provider(new SendGridEmailProvider(
+                                new SendGridEmailProvider.Config(Secret.of("SG.demo"), "no-reply@pinapp.dev", null), alwaysDown))
+                        .resilience(protectedStack)
+                        .build())
+                .build()) {
+            for (int i = 1; i <= 4; i++) {
+                System.out.print("   call " + i + ":");
+                show(s.trySend(EmailNotification.of("ana@example.com", "Hi", "x")));
+            }
+        }
+
+        idempotencyAndRecipientsDemo();
+    }
+
+    private static void idempotencyAndRecipientsDemo() {
+        section("7. Idempotency (same key twice) + CC/BCC + push priority/TTL");
+        try (NotificationService s = NotificationService.builder()
+                .register(Channels.email().provider(new SendGridEmailProvider(
+                        new SendGridEmailProvider.Config(Secret.of("SG.demo"), "no-reply@pinapp.dev", null))).build())
+                .register(Channels.push().provider(new FcmPushProvider(
+                        new FcmPushProvider.Config("pinapp-demo", Secret.of("ya29.demo")))).build())
+                .deduplication(new InMemoryDeduplicationStore(), Duration.ofHours(24))
+                .build()) {
+            EmailNotification invoice = EmailNotification.builder()
+                    .to("ana@example.com").to("luis@example.com").cc("boss@example.com").bcc("audit@example.com")
+                    .subject("Invoice #42").body("Attached soon").build();
+            System.out.print("   first send:  ");
+            show(s.send(invoice, "invoice-42-email"));
+            System.out.print("   second send: ");
+            show(s.send(invoice, "invoice-42-email"));
+            System.out.print("   push:        ");
+            show(s.send(PushNotification.builder().deviceToken("fcm-token-abc").title("Security alert")
+                    .body("New login detected").priority(PushNotification.Priority.HIGH)
+                    .ttl(Duration.ofMinutes(10)).build()));
         }
     }
 

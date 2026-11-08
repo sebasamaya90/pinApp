@@ -102,7 +102,7 @@ class NotificationServiceTest {
     @Test
     void trySendNeverThrowsAndDescribesTheFailure() {
         NotificationResult rejected = service.trySend(EmailNotification.of("bad", "s", "b"));
-        NotificationResult unrouted = service.trySend(new com.pinapp.notifications.slack.SlackNotification(null, "x"));
+        NotificationResult unrouted = service.trySend(new com.pinapp.notifications.slack.SlackNotification("x"));
 
         assertEquals(DeliveryStatus.REJECTED, rejected.status());
         assertTrue(rejected.error().contains("to: must be a valid email address"));

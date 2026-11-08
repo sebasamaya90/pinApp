@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+      - name: Build and test
+        run: mvn -B verify
+
+  dependency-scan:
+    # Complements Trivy (which already scans the Maven dependencies inside the image).
+    # The NVD feed is unreliable without an API key (HTTP 524 timeouts after minutes), so this job
+    # only runs when the NVD_API_KEY secret exists (free key: nvd.nist.gov/developers/request-an-api-key).
+    runs-on: ubuntu-latest
+    needs: build
+    env:
+      NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+    steps:
+      - name: Skip notice
+        if: env.NVD_API_KEY == ''
+        run: echo "::notice::NVD_API_KEY secret not set, skipping OWASP Dependency-Check (Trivy still scans dependencies)."
+      - uses: actions/checkout@v4
+        if: env.NVD_API_KEY != ''
+      - uses: actions/setup-java@v4
+        if: env.NVD_API_KEY != ''
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+      - name: Cache the NVD database
+        if: env.NVD_API_KEY != ''
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/owasp/dependency-check-data
+          key: depcheck-${{ github.run_id }}
+          restore-keys: depcheck-
+      - name: OWASP Dependency-Check (fails on CVSS >= 7)
+        if: env.NVD_API_KEY != ''
+        run: >
+          mvn -B org.owasp:dependency-check-maven:12.1.0:check
+          -DfailBuildOnCVSS=7 -DnvdApiKey="$NVD_API_KEY"
+
+  image-scan:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t notifications-lib:ci .
+      - name: Trivy scan
+        # Pinned to the commit of v0.36.0 (tags can be moved; a SHA cannot). Dependabot keeps it updated.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: notifications-lib:ci
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"

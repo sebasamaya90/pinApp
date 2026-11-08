@@ -11,10 +11,36 @@
     <name>notifications-lib</name>
     <description>Framework-agnostic, extensible notifications library (Email, SMS, Push, Slack)</description>
 
+    <!--
+      Maven Central metadata. TODO before publishing (these are placeholders, confirm them):
+        - groupId must be a namespace you have verified in Sonatype Central (e.g. io.github.<user>)
+        - url / scm / developers
+        - license (Apache-2.0 assumed; add the matching LICENSE file)
+    -->
+    <url>https://github.com/CHANGE-ME/notifications-lib</url>
+    <licenses>
+        <license>
+            <name>Apache License, Version 2.0</name>
+            <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+    <developers>
+        <developer>
+            <name>sebastian amaya</name>
+        </developer>
+    </developers>
+    <scm>
+        <connection>scm:git:https://github.com/CHANGE-ME/notifications-lib.git</connection>
+        <developerConnection>scm:git:ssh://git@github.com/CHANGE-ME/notifications-lib.git</developerConnection>
+        <url>https://github.com/CHANGE-ME/notifications-lib</url>
+    </scm>
+
     <properties>
         <java.version>25</java.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <jackson.version>2.19.2</jackson.version>
+        <!-- 2.19.2 had 8 HIGH CVEs (Trivy); fixed from 2.21.7 / 2.22.3 -->
+        <jackson.version>2.22.4</jackson.version>
         <slf4j.version>2.0.17</slf4j.version>
         <junit.version>5.13.4</junit.version>
     </properties>
@@ -55,7 +81,7 @@
                 <configuration>
                     <release>${java.version}</release>
                     <compilerArgs>
-                        <arg>-Xlint:all</arg>
+                        <arg>-Xlint:all,-serial</arg>
                     </compilerArgs>
                 </configuration>
             </plugin>
@@ -64,6 +90,7 @@
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.5.3</version>
             </plugin>
+            <!-- Copies runtime jars to target/lib so the demo can run with a plain classpath (Docker). -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-dependency-plugin</artifactId>
@@ -82,4 +109,66 @@
             </plugin>
         </plugins>
     </build>
+
+    <profiles>
+        <!--
+          Release to Maven Central:  mvn -Prelease clean deploy
+          Needs a GPG key and a "central" server (user token) in ~/.m2/settings.xml.
+          For a local packaging check without signing: mvn -Prelease -Dgpg.skip clean verify
+        -->
+        <profile>
+            <id>release</id>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-source-plugin</artifactId>
+                        <version>3.3.1</version>
+                        <executions>
+                            <execution>
+                                <id>attach-sources</id>
+                                <goals><goal>jar-no-fork</goal></goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-javadoc-plugin</artifactId>
+                        <version>3.11.2</version>
+                        <configuration>
+                            <doclint>none</doclint>
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <id>attach-javadocs</id>
+                                <goals><goal>jar</goal></goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-gpg-plugin</artifactId>
+                        <version>3.2.7</version>
+                        <executions>
+                            <execution>
+                                <id>sign-artifacts</id>
+                                <phase>verify</phase>
+                                <goals><goal>sign</goal></goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.sonatype.central</groupId>
+                        <artifactId>central-publishing-maven-plugin</artifactId>
+                        <version>0.8.0</version>
+                        <extensions>true</extensions>
+                        <configuration>
+                            <publishingServerId>central</publishingServerId>
+                            <autoPublish>false</autoPublish>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>

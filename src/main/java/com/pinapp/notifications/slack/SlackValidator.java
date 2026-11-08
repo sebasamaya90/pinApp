@@ -8,12 +8,14 @@ import java.util.List;
 
 public final class SlackValidator implements NotificationValidator<SlackNotification> {
 
+    /** Slack truncates messages above 40,000 characters (and advises about 4,000 for readability). */
+    public static final int MAX_BODY_LENGTH = 40_000;
+
     @Override
     public List<ValidationError> validate(SlackNotification n) {
         return new ValidationErrors()
                 .requireNotBlank("body", n.body())
-                .require(n.target() == null || n.target().startsWith("#") || n.target().startsWith("@"),
-                        "target", "must start with '#' (channel) or '@' (user)")
+                .requireMaxLength("body", n.body(), MAX_BODY_LENGTH)
                 .toList();
     }
 }

@@ -22,6 +22,15 @@ public record NotificationResult(
         return status == DeliveryStatus.SENT;
     }
 
+    public boolean isDuplicate() {
+        return status == DeliveryStatus.DUPLICATE;
+    }
+
+    static NotificationResult duplicate(String id, ChannelType channel) {
+        return new NotificationResult(id, channel, DeliveryStatus.DUPLICATE, "-", null, 0, Instant.now(),
+                "already processed (same idempotency key)");
+    }
+
     static NotificationResult sent(String id, ChannelType channel, ProviderResponse response) {
         return new NotificationResult(id, channel, DeliveryStatus.SENT, response.provider(),
                 response.messageId(), response.attempts(), Instant.now(), null);

@@ -13,5 +13,5 @@ public record NotificationEvent(
         String detail,
         Instant occurredAt) {
 
-    public enum Type { SENT, FAILED, REJECTED }
+    public enum Type { SENT, FAILED, REJECTED, DUPLICATE }
 }

@@ -8,7 +8,7 @@ import com.pinapp.notifications.provider.FallbackProvider;
 import com.pinapp.notifications.provider.NotificationProvider;
 import com.pinapp.notifications.provider.ProviderException;
 import com.pinapp.notifications.provider.ProviderResponse;
-import com.pinapp.notifications.provider.RetryingProvider;
+import com.pinapp.notifications.resilience.Resilience;
 import com.pinapp.notifications.retry.RetryPolicy;
 import com.pinapp.notifications.retry.Sleeper;
 import com.pinapp.notifications.validation.NotificationValidator;
@@ -33,8 +33,10 @@ public final class StandardChannel<N extends Notification> implements Notificati
         this.type = b.type;
         this.notificationType = b.notificationType;
         this.validator = b.validator;
+        Resilience resilience = b.resilience != null ? b.resilience
+                : Resilience.builder().retryPolicy(b.retryPolicy).sleeper(b.sleeper).build();
         List<NotificationProvider<N>> resilient = b.providers.stream()
-                .<NotificationProvider<N>>map(p -> new RetryingProvider<>(p, b.retryPolicy, b.sleeper))
+                .<NotificationProvider<N>>map(p -> resilience.decorate(p))
                 .toList();
         this.provider = resilient.size() == 1 ? resilient.get(0) : new FallbackProvider<>(resilient);
     }
@@ -77,6 +79,7 @@ public final class StandardChannel<N extends Notification> implements Notificati
         private final List<NotificationProvider<N>> providers = new ArrayList<>();
         private RetryPolicy retryPolicy = RetryPolicy.none();
         private Sleeper sleeper = Sleeper.THREAD;
+        private Resilience resilience;
 
         private Builder(ChannelType type, Class<N> notificationType, NotificationValidator<N> validator) {
             this.type = Objects.requireNonNull(type);
@@ -93,6 +96,15 @@ public final class StandardChannel<N extends Notification> implements Notificati
         /** Provider used when the previous ones fail. May be called several times (ordered). */
         public Builder<N> fallbackTo(NotificationProvider<N> provider) {
             providers.add(Objects.requireNonNull(provider));
+            return this;
+        }
+
+        /**
+         * Full resilience stack (retry, circuit breaker, bulkhead, rate limiter) applied to every provider
+         * of this channel. When set, it replaces {@link #retryPolicy} and {@link #sleeper}.
+         */
+        public Builder<N> resilience(Resilience resilience) {
+            this.resilience = Objects.requireNonNull(resilience);
             return this;
         }
 

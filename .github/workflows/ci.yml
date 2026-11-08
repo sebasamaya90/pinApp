@@ -50,7 +50,7 @@ jobs:
       - name: OWASP Dependency-Check (fails on CVSS >= 7)
         if: env.NVD_API_KEY != ''
         run: >
-          mvn -B org.owasp:dependency-check-maven:12.1.0:aggregate
+          mvn -B org.owasp:dependency-check-maven:12.1.0:check
           -DfailBuildOnCVSS=7 -DnvdApiKey="$NVD_API_KEY"
 
   image-scan:
